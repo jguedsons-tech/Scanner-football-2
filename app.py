@@ -1,3 +1,13 @@
+# ============================================================
+# GLOBAL FOOTBALL SCANNER
+# ============================================================
+# L10 + LIVE + PRÉ-JOGO + FINALIZADOS
+# TheSportsDB
+# football-data.org
+# OpenFootAPI
+# 5DollarFootballAPI
+# ============================================================
+
 import os
 import math
 import traceback
@@ -10,7 +20,7 @@ import streamlit as st
 
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO STREAMLIT
 # ============================================================
 
 st.set_page_config(
@@ -22,37 +32,68 @@ st.set_page_config(
 
 
 # ============================================================
-# CONFIGURAÇÕES DAS APIS
+# CONFIGURAÇÃO DAS APIs
 # ============================================================
 
-TSDB_KEY = os.getenv("THESPORTSDB_API_KEY", "123")
-TSDB_BASE = f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
+TSDB_KEY = os.getenv(
+    "THESPORTSDB_API_KEY",
+    "123"
+)
 
-FD_TOKEN = os.getenv("FOOTBALL_DATA_API_TOKEN", "")
+TSDB_BASE = (
+    f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
+)
+
+
+FD_TOKEN = os.getenv(
+    "FOOTBALL_DATA_API_TOKEN",
+    ""
+)
+
 FD_BASE = "https://api.football-data.org/v4"
+
 
 FD5_TOKEN = os.getenv(
     "FIVEDOLLAR_FOOTBALL_API_KEY",
-    os.getenv("FIVEDOLLAR_FOOTBALLAPI_KEY", "")
+    os.getenv(
+        "FIVEDOLLAR_FOOTBALLAPI_KEY",
+        ""
+    )
 )
+
 FD5_BASE = "https://api.5dollarfootballapi.com/v1"
 
-OPENFOOT_TOKEN = os.getenv("OPENFOOT_API_KEY", "")
+
+OPENFOOT_TOKEN = os.getenv(
+    "OPENFOOT_API_KEY",
+    ""
+)
+
 OPENFOOT_BASE = "https://openfootapi.com/v1"
 
+
 TIMEOUT = 15
+
 L10_N = 10
+
 BRT = ZoneInfo("America/Sao_Paulo")
 
+
+# ============================================================
+# STATUS
+# ============================================================
 
 LIVE_STATUSES = {
     "LIVE",
     "IN_PLAY",
+    "INPLAY",
     "1H",
     "2H",
     "HT",
     "ET",
     "P",
+    "HALF_TIME",
+    "SECOND_HALF",
 }
 
 FINAL_STATUSES = {
@@ -71,19 +112,23 @@ PRE_STATUSES = {
     "SCHEDULED",
     "TIMED",
     "UPCOMING",
+    "NOT_STARTED",
 }
 
 
 # ============================================================
-# FUNÇÕES BÁSICAS
+# FUNÇÕES UTILITÁRIAS
 # ============================================================
 
 def safe_float(value, default=0.0):
+
     try:
+
         if value is None:
             return default
 
         if isinstance(value, str):
+
             value = (
                 value
                 .replace("%", "")
@@ -97,14 +142,17 @@ def safe_float(value, default=0.0):
         return float(value)
 
     except Exception:
+
         return default
 
 
 def pct(value):
+
     return f"{safe_float(value):.1f}%"
 
 
 def norm_status(status):
+
     if status is None:
         return ""
 
@@ -118,13 +166,18 @@ def norm_status(status):
 
 
 def parse_kickoff(value):
+
     if not value:
         return None
 
     try:
+
         if isinstance(value, datetime):
+
             dt = value
+
         else:
+
             text = str(value).strip()
 
             if text.endswith("Z"):
@@ -133,69 +186,78 @@ def parse_kickoff(value):
             dt = datetime.fromisoformat(text)
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
 
         return dt.astimezone(BRT)
 
     except Exception:
-        return None
 
-
-def classify_event(event):
-    status = norm_status(event.get("status", ""))
-
-    if status in LIVE_STATUSES:
-        return "live"
-
-    if status in FINAL_STATUSES:
-        return "finished"
-
-    if status in PRE_STATUSES:
-        return "upcoming"
-
-    kickoff = parse_kickoff(event.get("kickoff"))
-
-    if kickoff:
-        now = datetime.now(BRT)
-
-        if kickoff <= now:
-            return "live"
-
-        return "upcoming"
-
-    return "unknown"
-
-
-def request_json(
-    url,
-    headers=None,
-    params=None,
-    timeout=TIMEOUT
-):
-    try:
-        response = requests.get(
-            url,
-            headers=headers or {},
-            params=params or {},
-            timeout=timeout
-        )
-
-        if response.status_code != 200:
-            return None
-
-        return response.json()
-
-    except Exception:
         return None
 
 
 # ============================================================
-# MODELO DE PROBABILIDADE
+# CLASSIFICAÇÃO DAS PARTIDAS
+# ============================================================
+
+def classify_event(event):
+
+    status = norm_status(
+        event.get("status", "")
+    )
+
+    # LIVE
+    if status in LIVE_STATUSES:
+        return "live"
+
+    # FINALIZADO
+    if status in FINAL_STATUSES:
+        return "finished"
+
+    # PRÉ-JOGO
+    if status in PRE_STATUSES:
+        return "upcoming"
+
+    kickoff = parse_kickoff(
+        event.get("kickoff")
+    )
+
+    if kickoff:
+
+        now = datetime.now(BRT)
+
+        # Futuro = próximo
+        if kickoff > now:
+            return "upcoming"
+
+        # Se possui placar, provavelmente finalizado
+        if (
+            event.get("home_score") is not None
+            and
+            event.get("away_score") is not None
+        ):
+
+            return "finished"
+
+        # Não esconder partidas com status desconhecido
+        return "unknown"
+
+    # IMPORTANTE:
+    # Se a API não informou status/data corretamente,
+    # não descartamos a partida.
+    return "unknown"
+
+
+# ============================================================
+# POISSON
 # ============================================================
 
 def poisson_pmf(k, lam):
 
     try:
+
         lam = max(
             0.001,
             safe_float(lam)
@@ -203,24 +265,36 @@ def poisson_pmf(k, lam):
 
         return (
             math.exp(-lam)
-            * (lam ** k)
-            / math.factorial(k)
+            *
+            (lam ** k)
+            /
+            math.factorial(k)
         )
 
     except Exception:
+
         return 0.0
 
 
-def model_probs(home_lambda, away_lambda):
+def model_probs(
+    home_lambda,
+    away_lambda
+):
 
     home_lambda = max(
         0.01,
-        safe_float(home_lambda, 1.0)
+        safe_float(
+            home_lambda,
+            1.0
+        )
     )
 
     away_lambda = max(
         0.01,
-        safe_float(away_lambda, 1.0)
+        safe_float(
+            away_lambda,
+            1.0
+        )
     )
 
     home_win = 0.0
@@ -250,33 +324,49 @@ def model_probs(home_lambda, away_lambda):
             probability = ph * pa
 
             if hg > ag:
+
                 home_win += probability
 
             elif hg == ag:
+
                 draw += probability
 
             else:
+
                 away_win += probability
 
             total = hg + ag
 
             if hg >= 1 and ag >= 1:
+
                 btts += probability
 
             if total >= 2:
+
                 over15 += probability
 
             if total >= 3:
+
                 over25 += probability
+
             else:
+
                 under25 += probability
 
             if total <= 3:
+
                 under35 += probability
 
-    total = home_win + draw + away_win
+    total = (
+        home_win
+        +
+        draw
+        +
+        away_win
+    )
 
     if total <= 0:
+
         total = 1.0
 
     home_win /= total
@@ -290,6 +380,7 @@ def model_probs(home_lambda, away_lambda):
     under35 /= total
 
     return {
+
         "home_win": home_win,
         "draw": draw,
         "away_win": away_win,
@@ -309,126 +400,145 @@ def model_probs(home_lambda, away_lambda):
 
 
 # ============================================================
-# THESPORTSDB
+# REQUEST HTTP
+# ============================================================
+
+def request_json(
+    url,
+    headers=None,
+    params=None,
+    timeout=TIMEOUT
+):
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers or {},
+            params=params or {},
+            timeout=timeout,
+        )
+
+        if response.status_code != 200:
+
+            return None
+
+        return response.json()
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# THE SPORTS DB
 # ============================================================
 
 def tsdb_day(day):
 
-    url = f"{TSDB_BASE}/eventsday.php"
-
     data = request_json(
-        url,
+        f"{TSDB_BASE}/eventsday.php",
         params={
-            "d": day,
-            "s": "Soccer"
-        }
+            "d": day.isoformat(),
+            "s": "Soccer",
+        },
     )
 
     if not data:
         return []
 
-    return data.get("events", []) or []
+    return data.get(
+        "events",
+        []
+    ) or []
 
 
 def tsdb_team_search(team):
 
-    if not team:
-        return []
-
-    url = f"{TSDB_BASE}/searchteams.php"
-
     data = request_json(
-        url,
+        f"{TSDB_BASE}/searchteams.php",
         params={
             "t": team
-        }
+        },
     )
 
     if not data:
         return []
 
-    return data.get("teams", []) or []
+    return data.get(
+        "teams",
+        []
+    ) or []
 
 
 def tsdb_last(team_id):
 
-    if not team_id:
-        return []
-
-    url = f"{TSDB_BASE}/eventslast.php"
-
     data = request_json(
-        url,
+        f"{TSDB_BASE}/eventslast.php",
         params={
             "id": team_id
-        }
+        },
     )
 
     if not data:
         return []
 
-    return data.get("results", []) or []
+    return data.get(
+        "results",
+        []
+    ) or []
 
 
 def normalize_tsdb_event(event):
 
-    if not event:
-        return None
+    return {
 
-    try:
+        "id": event.get(
+            "idEvent"
+        ),
 
-        return {
-            "id": str(
-                event.get("idEvent", "")
-            ),
+        "home": event.get(
+            "strHomeTeam"
+        ),
 
-            "home": (
-                event.get("strHomeTeam")
-                or "Casa"
-            ),
+        "away": event.get(
+            "strAwayTeam"
+        ),
 
-            "away": (
-                event.get("strAwayTeam")
-                or "Fora"
-            ),
+        "home_id": event.get(
+            "idHomeTeam"
+        ),
 
-            "home_id": str(
-                event.get("idHomeTeam")
-                or ""
-            ),
+        "away_id": event.get(
+            "idAwayTeam"
+        ),
 
-            "away_id": str(
-                event.get("idAwayTeam")
-                or ""
-            ),
+        "kickoff": event.get(
+            "strTimestamp"
+        )
+        or event.get(
+            "dateEvent"
+        ),
 
-            "kickoff": (
-                f"{event.get('dateEvent')}T"
-                f"{event.get('strTime') or '00:00:00'}"
-                if event.get("dateEvent")
-                else None
-            ),
+        "status": event.get(
+            "strStatus"
+        )
+        or event.get(
+            "strProgress"
+        ),
 
-            "status": (
-                event.get("strStatus")
-                or ""
-            ),
+        "home_score": event.get(
+            "intHomeScore"
+        ),
 
-            "home_score": event.get(
-                "intHomeScore"
-            ),
+        "away_score": event.get(
+            "intAwayScore"
+        ),
 
-            "away_score": event.get(
-                "intAwayScore"
-            ),
+        "source": "TheSportsDB",
 
-            "source": "TheSportsDB",
-
-            "raw": event,
-        }
-
-    except Exception:
-        return None
+        "raw": event,
+    }
 
 
 # ============================================================
@@ -438,13 +548,14 @@ def normalize_tsdb_event(event):
 def fd_competitions():
 
     if not FD_TOKEN:
+
         return []
 
     data = request_json(
         f"{FD_BASE}/competitions",
         headers={
             "X-Auth-Token": FD_TOKEN
-        }
+        },
     )
 
     if not data:
@@ -462,6 +573,7 @@ def fd_matches(
 ):
 
     if not FD_TOKEN:
+
         return []
 
     data = request_json(
@@ -470,9 +582,9 @@ def fd_matches(
             "X-Auth-Token": FD_TOKEN
         },
         params={
-            "dateFrom": date_from,
-            "dateTo": date_to
-        }
+            "dateFrom": date_from.isoformat(),
+            "dateTo": date_to.isoformat(),
+        },
     )
 
     if not data:
@@ -486,81 +598,68 @@ def fd_matches(
 
 def normalize_fd_event(event):
 
-    if not event:
-        return None
+    score = event.get(
+        "score",
+        {}
+    ) or {}
 
-    try:
+    full_time = score.get(
+        "fullTime",
+        {}
+    ) or {}
 
-        home = (
-            event.get("homeTeam")
-            or {}
-        )
+    home_team = event.get(
+        "homeTeam",
+        {}
+    ) or {}
 
-        away = (
-            event.get("awayTeam")
-            or {}
-        )
+    away_team = event.get(
+        "awayTeam",
+        {}
+    ) or {}
 
-        score = (
-            event.get("score")
-            or {}
-        )
+    return {
 
-        full_time = (
-            score.get("fullTime")
-            or {}
-        )
+        "id": event.get(
+            "id"
+        ),
 
-        return {
+        "home": home_team.get(
+            "name"
+        ),
 
-            "id": str(
-                event.get("id", "")
-            ),
+        "away": away_team.get(
+            "name"
+        ),
 
-            "home": (
-                home.get("name")
-                or "Casa"
-            ),
+        "home_id": home_team.get(
+            "id"
+        ),
 
-            "away": (
-                away.get("name")
-                or "Fora"
-            ),
+        "away_id": away_team.get(
+            "id"
+        ),
 
-            "home_id": str(
-                home.get("id")
-                or ""
-            ),
+        "kickoff": event.get(
+            "utcDate"
+        ),
 
-            "away_id": str(
-                away.get("id")
-                or ""
-            ),
+        "status": event.get(
+            "status"
+        ),
 
-            "kickoff": event.get(
-                "utcDate"
-            ),
+        "home_score": full_time.get(
+            "home"
+        ),
 
-            "status": event.get(
-                "status",
-                ""
-            ),
+        "away_score": full_time.get(
+            "away"
+        ),
 
-            "home_score": full_time.get(
-                "home"
-            ),
+        "source": "football-data.org",
 
-            "away_score": full_time.get(
-                "away"
-            ),
-
-            "source": "football-data.org",
-
-            "raw": event,
-        }
-
-    except Exception:
-        return None
+        "raw": event,
+    }
 
 
 # ============================================================
@@ -570,20 +669,22 @@ def normalize_fd_event(event):
 def openfoot_matches():
 
     if not OPENFOOT_TOKEN:
+
         return []
 
     data = request_json(
         f"{OPENFOOT_BASE}/matches",
         headers={
             "Authorization":
-                f"Bearer {OPENFOOT_TOKEN}"
-        }
+            f"Bearer {OPENFOOT_TOKEN}"
+        },
     )
 
     if not data:
         return []
 
     if isinstance(data, list):
+
         return data
 
     return (
@@ -596,24 +697,22 @@ def openfoot_matches():
 def openfoot_team_search(team):
 
     if not OPENFOOT_TOKEN:
+
         return []
 
     data = request_json(
         f"{OPENFOOT_BASE}/teams",
         headers={
             "Authorization":
-                f"Bearer {OPENFOOT_TOKEN}"
+            f"Bearer {OPENFOOT_TOKEN}"
         },
         params={
             "search": team
-        }
+        },
     )
 
     if not data:
         return []
-
-    if isinstance(data, list):
-        return data
 
     return (
         data.get("teams")
@@ -625,21 +724,19 @@ def openfoot_team_search(team):
 def openfoot_team_matches(team_id):
 
     if not OPENFOOT_TOKEN:
+
         return []
 
     data = request_json(
         f"{OPENFOOT_BASE}/teams/{team_id}/matches",
         headers={
             "Authorization":
-                f"Bearer {OPENFOOT_TOKEN}"
-        }
+            f"Bearer {OPENFOOT_TOKEN}"
+        },
     )
 
     if not data:
         return []
-
-    if isinstance(data, list):
-        return data
 
     return (
         data.get("matches")
@@ -650,148 +747,126 @@ def openfoot_team_matches(team_id):
 
 def normalize_openfoot_event(event):
 
-    if not event:
-        return None
+    home = (
+        event.get("homeTeam")
+        or event.get("home")
+        or {}
+    )
 
-    try:
+    away = (
+        event.get("awayTeam")
+        or event.get("away")
+        or {}
+    )
 
-        home = (
-            event.get("homeTeam")
-            or event.get("home")
-            or {}
+    if isinstance(home, str):
+
+        home_name = home
+        home_id = None
+
+    else:
+
+        home_name = (
+            home.get("name")
+            or home.get("teamName")
         )
 
-        away = (
-            event.get("awayTeam")
-            or event.get("away")
-            or {}
+        home_id = (
+            home.get("id")
+            or home.get("teamId")
         )
 
-        if isinstance(home, str):
+    if isinstance(away, str):
 
-            home_name = home
-            home_id = ""
+        away_name = away
+        away_id = None
 
-        else:
+    else:
 
-            home_name = (
-                home.get("name")
-                or home.get(
-                    "shortName",
-                    "Casa"
-                )
-            )
-
-            home_id = str(
-                home.get("id")
-                or ""
-            )
-
-        if isinstance(away, str):
-
-            away_name = away
-            away_id = ""
-
-        else:
-
-            away_name = (
-                away.get("name")
-                or away.get(
-                    "shortName",
-                    "Fora"
-                )
-            )
-
-            away_id = str(
-                away.get("id")
-                or ""
-            )
-
-        score = (
-            event.get("score")
-            or {}
+        away_name = (
+            away.get("name")
+            or away.get("teamName")
         )
 
-        return {
+        away_id = (
+            away.get("id")
+            or away.get("teamId")
+        )
 
-            "id": str(
-                event.get("id", "")
-            ),
+    score = (
+        event.get("score")
+        or {}
+    )
 
-            "home": home_name,
+    return {
 
-            "away": away_name,
+        "id": (
+            event.get("id")
+            or event.get("matchId")
+        ),
 
-            "home_id": home_id,
+        "home": home_name,
 
-            "away_id": away_id,
+        "away": away_name,
 
-            "kickoff": (
-                event.get("kickoff")
-                or event.get("date")
-                or event.get("utcDate")
-            ),
+        "home_id": home_id,
 
-            "status": event.get(
-                "status",
-                ""
-            ),
+        "away_id": away_id,
 
-            "home_score": (
-                score.get("home")
-                if isinstance(
-                    score,
-                    dict
-                )
-                else None
-            ),
+        "kickoff": (
+            event.get("utcDate")
+            or event.get("date")
+            or event.get("kickoff")
+            or event.get("startTime")
+        ),
 
-            "away_score": (
-                score.get("away")
-                if isinstance(
-                    score,
-                    dict
-                )
-                else None
-            ),
+        "status": (
+            event.get("status")
+            or event.get("state")
+        ),
 
-            "source": "OpenFootAPI",
+        "home_score": (
+            event.get("homeScore")
+            or score.get("home")
+        ),
 
-            "raw": event,
-        }
+        "away_score": (
+            event.get("awayScore")
+            or score.get("away")
+        ),
 
-    except Exception:
-        return None
+        "source": "OpenFootAPI",
+
+        "raw": event,
+    }
 
 
 # ============================================================
-# 5DOLLARFOOTBALLAPI
+# 5 DOLLAR FOOTBALL API
 # ============================================================
 
 def fd5_day(day):
 
     if not FD5_TOKEN:
+
         return []
 
     data = request_json(
-        f"{FD5_BASE}/fixtures",
+        f"{FD5_BASE}/matches",
         headers={
             "Authorization":
-                f"Bearer {FD5_TOKEN}"
+            f"Bearer {FD5_TOKEN}"
         },
         params={
-            "date": day
-        }
+            "date": day.isoformat()
+        },
     )
 
     if not data:
         return []
 
-    if isinstance(data, list):
-        return data
-
     return (
-        data.get("fixtures")
+        data.get("matches")
         or data.get("data")
         or []
     )
@@ -800,27 +875,23 @@ def fd5_day(day):
 def fd5_team_fixtures(team_id):
 
     if not FD5_TOKEN:
+
         return []
 
     data = request_json(
-        f"{FD5_BASE}/fixtures",
+        f"{FD5_BASE}/teams/{team_id}/fixtures",
         headers={
             "Authorization":
-                f"Bearer {FD5_TOKEN}"
+            f"Bearer {FD5_TOKEN}"
         },
-        params={
-            "team": team_id
-        }
     )
 
     if not data:
         return []
 
-    if isinstance(data, list):
-        return data
-
     return (
-        data.get("fixtures")
+        data.get("matches")
+        or data.get("fixtures")
         or data.get("data")
         or []
     )
@@ -828,130 +899,104 @@ def fd5_team_fixtures(team_id):
 
 def normalize_fd5_event(event):
 
-    if not event:
-        return None
+    home = (
+        event.get("homeTeam")
+        or event.get("home")
+        or {}
+    )
 
-    try:
+    away = (
+        event.get("awayTeam")
+        or event.get("away")
+        or {}
+    )
 
-        home = (
-            event.get("home")
-            or event.get("homeTeam")
-            or {}
+    if isinstance(home, str):
+
+        home_name = home
+        home_id = None
+
+    else:
+
+        home_name = (
+            home.get("name")
+            or home.get("teamName")
         )
 
-        away = (
-            event.get("away")
-            or event.get("awayTeam")
-            or {}
+        home_id = (
+            home.get("id")
+            or home.get("teamId")
         )
 
-        if isinstance(home, str):
+    if isinstance(away, str):
 
-            home_name = home
-            home_id = ""
+        away_name = away
+        away_id = None
 
-        else:
+    else:
 
-            home_name = (
-                home.get("name")
-                or home.get(
-                    "teamName",
-                    "Casa"
-                )
-            )
-
-            home_id = str(
-                home.get("id")
-                or home.get(
-                    "teamId",
-                    ""
-                )
-            )
-
-        if isinstance(away, str):
-
-            away_name = away
-            away_id = ""
-
-        else:
-
-            away_name = (
-                away.get("name")
-                or away.get(
-                    "teamName",
-                    "Fora"
-                )
-            )
-
-            away_id = str(
-                away.get("id")
-                or away.get(
-                    "teamId",
-                    ""
-                )
-            )
-
-        score = (
-            event.get("score")
-            or event.get("scores")
-            or {}
+        away_name = (
+            away.get("name")
+            or away.get("teamName")
         )
 
-        return {
+        away_id = (
+            away.get("id")
+            or away.get("teamId")
+        )
 
-            "id": str(
-                event.get("id", "")
-            ),
+    score = (
+        event.get("score")
+        or {}
+    )
 
-            "home": home_name,
+    return {
 
-            "away": away_name,
+        "id": (
+            event.get("id")
+            or event.get("matchId")
+        ),
 
-            "home_id": home_id,
+        "home": home_name,
 
-            "away_id": away_id,
+        "away": away_name,
 
-            "kickoff": (
-                event.get("kickoff")
-                or event.get("date")
-                or event.get("utcDate")
-            ),
+        "home_id": home_id,
 
-            "status": event.get(
-                "status",
-                ""
-            ),
+        "away_id": away_id,
 
-            "home_score": (
-                score.get("home")
-                if isinstance(
-                    score,
-                    dict
-                )
-                else None
-            ),
+        "kickoff": (
+            event.get("utcDate")
+            or event.get("date")
+            or event.get("kickoff")
+            or event.get("startTime")
+        ),
 
-            "away_score": (
-                score.get("away")
-                if isinstance(
-                    score,
-                    dict
-                )
-                else None
-            ),
+        "status": (
+            event.get("status")
+            or event.get("state")
+        ),
 
-            "source":
-                "5DollarFootballAPI",
+        "home_score": (
+            event.get("homeScore")
+            if event.get("homeScore") is not None
+            else score.get("home")
+        ),
 
-            "raw": event,
-        }
+        "away_score": (
+            event.get("awayScore")
+            if event.get("awayScore") is not None
+            else score.get("away")
+        ),
 
-    except Exception:
-        return None
+        "source": "5DollarFootballAPI",
+
+        "raw": event,
+    }
 
 
 # ============================================================
-# NORMALIZAÇÃO
+# EVENTOS
 # ============================================================
 
 def normalize_name(name):
@@ -969,22 +1014,29 @@ def normalize_name(name):
 def event_key(event):
 
     if event.get("id"):
+
         return (
             event.get("source", "")
-            + "_"
-            + str(event["id"])
+            +
+            "_"
+            +
+            str(event["id"])
         )
 
     return (
         normalize_name(
             event.get("home")
         )
-        + "_"
-        + normalize_name(
+        +
+        "_"
+        +
+        normalize_name(
             event.get("away")
         )
-        + "_"
-        + str(
+        +
+        "_"
+        +
+        str(
             event.get("kickoff")
             or ""
         )
@@ -998,6 +1050,7 @@ def event_date(event):
     )
 
     if kickoff:
+
         return kickoff.date()
 
     return None
@@ -1010,139 +1063,195 @@ def event_is_finished(event):
     )
 
     if status in FINAL_STATUSES:
+
         return True
 
-    hs = event.get("home_score")
-    aws = event.get("away_score")
+    hs = event.get(
+        "home_score"
+    )
+
+    aws = event.get(
+        "away_score"
+    )
 
     return (
         hs is not None
-        and aws is not None
-        and status not in LIVE_STATUSES
+        and
+        aws is not None
+        and
+        status not in LIVE_STATUSES
     )
 
 
 # ============================================================
-# CARREGAR JOGOS
+# CARREGAR EVENTOS DO DIA
 # ============================================================
 
 def load_global_events():
 
-    events = []
+    today = datetime.now(
+        BRT
+    ).date()
 
-    today = datetime.now(BRT).date()
-
-    dates = [
-        today,
-        today
-    ]
+    all_events = []
 
     # --------------------------------------------------------
     # THESPORTSDB
     # --------------------------------------------------------
 
-    for d in dates:
+    try:
 
-        raw = tsdb_day(
-            d.isoformat()
-        )
-
-        for item in raw:
+        for raw in tsdb_day(today):
 
             event = normalize_tsdb_event(
-                item
+                raw
             )
 
-            if event:
-                events.append(event)
+            if (
+                event.get("home")
+                and
+                event.get("away")
+            ):
+
+                all_events.append(
+                    event
+                )
+
+    except Exception:
+        pass
+
 
     # --------------------------------------------------------
     # FOOTBALL-DATA
     # --------------------------------------------------------
 
-    if FD_TOKEN:
+    try:
 
-        raw = fd_matches(
-            today.isoformat(),
-            today.isoformat()
-        )
+        if FD_TOKEN:
 
-        for item in raw:
+            for raw in fd_matches(
+                today,
+                today
+            ):
 
-            event = normalize_fd_event(
-                item
-            )
+                event = normalize_fd_event(
+                    raw
+                )
 
-            if event:
-                events.append(event)
+                if (
+                    event.get("home")
+                    and
+                    event.get("away")
+                ):
+
+                    all_events.append(
+                        event
+                    )
+
+    except Exception:
+        pass
+
 
     # --------------------------------------------------------
     # OPENFOOT
     # --------------------------------------------------------
 
-    if OPENFOOT_TOKEN:
+    try:
 
-        raw = openfoot_matches()
+        if OPENFOOT_TOKEN:
 
-        for item in raw:
+            for raw in openfoot_matches():
 
-            event = normalize_openfoot_event(
-                item
-            )
+                event = normalize_openfoot_event(
+                    raw
+                )
 
-            if event:
+                if not (
+                    event.get("home")
+                    and
+                    event.get("away")
+                ):
 
-                dt = event_date(event)
+                    continue
+
+                edate = event_date(
+                    event
+                )
 
                 if (
-                    dt is None
-                    or dt == today
+                    edate is None
+                    or
+                    edate == today
                 ):
-                    events.append(event)
+
+                    all_events.append(
+                        event
+                    )
+
+    except Exception:
+        pass
+
 
     # --------------------------------------------------------
-    # 5DOLLAR
+    # 5 DOLLAR
     # --------------------------------------------------------
 
-    if FD5_TOKEN:
+    try:
 
-        raw = fd5_day(
-            today.isoformat()
-        )
+        if FD5_TOKEN:
 
-        for item in raw:
+            for raw in fd5_day(
+                today
+            ):
 
-            event = normalize_fd5_event(
-                item
-            )
+                event = normalize_fd5_event(
+                    raw
+                )
 
-            if event:
-                events.append(event)
+                if (
+                    event.get("home")
+                    and
+                    event.get("away")
+                ):
 
-    # --------------------------------------------------------
-    # REMOVER DUPLICADOS
-    # --------------------------------------------------------
+                    all_events.append(
+                        event
+                    )
 
-    unique = {}
+    except Exception:
+        pass
+
+
+    # ========================================================
+    # REMOVER DUPLICADAS
+    # ========================================================
 
     priority = {
+
         "5DollarFootballAPI": 5,
+
         "OpenFootAPI": 4,
+
         "football-data.org": 3,
+
         "TheSportsDB": 1,
     }
 
-    for event in events:
+    unique = {}
 
-        key = event_key(event)
+    for event in all_events:
 
-        old = unique.get(key)
+        key = event_key(
+            event
+        )
 
-        if old is None:
+        if key not in unique:
 
             unique[key] = event
 
         else:
+
+            old = unique[key]
 
             old_priority = priority.get(
                 old.get("source"),
@@ -1158,22 +1267,33 @@ def load_global_events():
 
                 unique[key] = event
 
-    result = list(
+
+    events = list(
         unique.values()
     )
 
-    result.sort(
+
+    # ========================================================
+    # ORDENAR
+    # ========================================================
+
+    events.sort(
         key=lambda x: (
-            event_date(x)
-            or today
+            parse_kickoff(
+                x.get("kickoff")
+            )
+            or datetime.max.replace(
+                tzinfo=timezone.utc
+            )
         )
     )
 
-    return result
+
+    return events
 
 
 # ============================================================
-# FORM / L10
+# FORMULÁRIO L10
 # ============================================================
 
 def make_form(
@@ -1197,15 +1317,19 @@ def make_form(
             event.get("away")
         )
 
+        # Compatibilidade parcial
         if (
             team_norm not in home
-            and team_norm not in away
+            and
+            team_norm not in away
         ):
+
             continue
 
         if not event_is_finished(
             event
         ):
+
             continue
 
         hs = event.get(
@@ -1216,7 +1340,12 @@ def make_form(
             "away_score"
         )
 
-        if hs is None or aws is None:
+        if (
+            hs is None
+            or
+            aws is None
+        ):
+
             continue
 
         hs = safe_float(hs)
@@ -1233,30 +1362,41 @@ def make_form(
             ga = hs
 
         if gf > ga:
+
             result = "V"
 
         elif gf == ga:
+
             result = "E"
 
         else:
+
             result = "D"
 
         games.append({
+
             "date":
-                event_date(event),
+                event_date(
+                    event
+                ),
 
             "opponent":
-                event.get("away")
-                if team_norm == home
-                else event.get("home"),
+                (
+                    event.get("away")
+                    if team_norm == home
+                    else
+                    event.get("home")
+                ),
 
             "gf": gf,
+
             "ga": ga,
 
             "result": result,
 
             "event": event,
         })
+
 
     games.sort(
         key=lambda x: (
@@ -1266,36 +1406,31 @@ def make_form(
         reverse=True
     )
 
+
     return games[:L10_N]
 
 
+# ============================================================
+# ESTATÍSTICAS L10
+# ============================================================
+
 def l10_stats(form):
 
-    if not form:
-        return {
-            "jogos": 0,
-            "vitorias": 0,
-            "empates": 0,
-            "derrotas": 0,
-            "gf": 0.0,
-            "ga": 0.0,
-            "media_gf": 0.0,
-            "media_ga": 0.0,
-        }
+    jogos = len(form)
 
-    v = sum(
+    vitorias = sum(
         1
         for x in form
         if x["result"] == "V"
     )
 
-    e = sum(
+    empates = sum(
         1
         for x in form
         if x["result"] == "E"
     )
 
-    d = sum(
+    derrotas = sum(
         1
         for x in form
         if x["result"] == "D"
@@ -1311,27 +1446,35 @@ def l10_stats(form):
         for x in form
     )
 
-    n = len(form)
+    media_gf = (
+        gf / jogos
+        if jogos
+        else 0
+    )
+
+    media_ga = (
+        ga / jogos
+        if jogos
+        else 0
+    )
 
     return {
 
-        "jogos": n,
+        "jogos": jogos,
 
-        "vitorias": v,
+        "vitorias": vitorias,
 
-        "empates": e,
+        "empates": empates,
 
-        "derrotas": d,
+        "derrotas": derrotas,
 
         "gf": gf,
 
         "ga": ga,
 
-        "media_gf":
-            gf / n if n else 0,
+        "media_gf": media_gf,
 
-        "media_ga":
-            ga / n if n else 0,
+        "media_ga": media_ga,
     }
 
 
@@ -1345,12 +1488,23 @@ def h2h_stats(
     away
 ):
 
-    home_norm = normalize_name(home)
-    away_norm = normalize_name(away)
+    home_norm = normalize_name(
+        home
+    )
+
+    away_norm = normalize_name(
+        away
+    )
 
     matches = []
 
     for event in events:
+
+        if not event_is_finished(
+            event
+        ):
+
+            continue
 
         eh = normalize_name(
             event.get("home")
@@ -1360,47 +1514,39 @@ def h2h_stats(
             event.get("away")
         )
 
-        if not (
-            (
-                home_norm in eh
-                and away_norm in ea
+        same_order = (
+            home_norm in eh
+            and
+            away_norm in ea
+        )
+
+        reverse_order = (
+            home_norm in ea
+            and
+            away_norm in eh
+        )
+
+        if same_order or reverse_order:
+
+            matches.append(
+                event
             )
-            or
-            (
-                away_norm in eh
-                and home_norm in ea
-            )
-        ):
-            continue
 
-        if not event_is_finished(
-            event
-        ):
-            continue
-
-        if (
-            event.get("home_score")
-            is None
-            or
-            event.get("away_score")
-            is None
-        ):
-            continue
-
-        matches.append(event)
 
     matches.sort(
-        key=lambda x:
+        key=lambda x: (
             event_date(x)
-            or datetime.min.date(),
+            or datetime.min.date()
+        ),
         reverse=True
     )
+
 
     return matches[:10]
 
 
 # ============================================================
-# PREDIÇÃO
+# PREVISÃO
 # ============================================================
 
 def build_prediction(
@@ -1416,19 +1562,36 @@ def build_prediction(
         away_l10
     )
 
-    home_attack = hs["media_gf"]
-    home_defense = hs["media_ga"]
 
-    away_attack = aws["media_gf"]
-    away_defense = aws["media_ga"]
+    home_attack = hs[
+        "media_gf"
+    ]
 
+    home_defense = hs[
+        "media_ga"
+    ]
+
+    away_attack = aws[
+        "media_gf"
+    ]
+
+    away_defense = aws[
+        "media_ga"
+    ]
+
+
+    # Base caso não exista L10
     if hs["jogos"] == 0:
+
         home_attack = 1.20
         home_defense = 1.20
 
+
     if aws["jogos"] == 0:
+
         away_attack = 1.00
         away_defense = 1.20
+
 
     home_lambda = (
         home_attack * 0.65
@@ -1436,87 +1599,118 @@ def build_prediction(
         away_defense * 0.35
     )
 
+
     away_lambda = (
         away_attack * 0.65
         +
         home_defense * 0.35
     )
 
-    # vantagem simples de mando
+
+    # Fator simples de mando
     home_lambda *= 1.08
+
 
     probs = model_probs(
         home_lambda,
         away_lambda
     )
 
+
     return {
+
         "home_lambda":
             home_lambda,
 
         "away_lambda":
             away_lambda,
 
-        **probs
+        **probs,
     }
 
 
 # ============================================================
-# SUGESTÕES
+# ODD JUSTA
 # ============================================================
 
-def fair_odd(probability):
+def fair_odd(
+    probability
+):
 
     probability = safe_float(
         probability
     )
 
     if probability <= 0:
-        return 0.0
+
+        return None
 
     return 1 / probability
 
 
-def suggestions(pred):
+# ============================================================
+# SUGESTÕES
+# ============================================================
 
-    markets = {
+def suggestions(
+    pred
+):
 
-        "1X":
-            pred["1x"],
+    markets = [
 
-        "X2":
-            pred["x2"],
+        (
+            "1X",
+            pred["1x"]
+        ),
 
-        "BTTS SIM":
-            pred["btts_yes"],
+        (
+            "X2",
+            pred["x2"]
+        ),
 
-        "BTTS NÃO":
-            pred["btts_no"],
+        (
+            "BTTS SIM",
+            pred["btts_yes"]
+        ),
 
-        "OVER 1.5":
-            pred["over15"],
+        (
+            "BTTS NÃO",
+            pred["btts_no"]
+        ),
 
-        "OVER 2.5":
-            pred["over25"],
+        (
+            "OVER 1.5",
+            pred["over15"]
+        ),
 
-        "UNDER 2.5":
-            pred["under25"],
+        (
+            "OVER 2.5",
+            pred["over25"]
+        ),
 
-        "UNDER 3.5":
-            pred["under35"],
-    }
+        (
+            "UNDER 2.5",
+            pred["under25"]
+        ),
+
+        (
+            "UNDER 3.5",
+            pred["under35"]
+        ),
+    ]
+
 
     rows = []
 
-    for market, probability in markets.items():
+    for name, probability in markets:
 
         rows.append({
 
             "Mercado":
-                market,
+                name,
 
             "Probabilidade":
-                probability * 100,
+                probability,
 
             "Odd justa":
                 fair_odd(
@@ -1524,17 +1718,19 @@ def suggestions(pred):
                 ),
         })
 
+
     rows.sort(
         key=lambda x:
-            x["Probabilidade"],
+        x["Probabilidade"],
         reverse=True
     )
+
 
     return rows
 
 
 # ============================================================
-# ANÁLISE
+# ANÁLISE DA PARTIDA
 # ============================================================
 
 def analyze_event(
@@ -1552,6 +1748,7 @@ def analyze_event(
         "Fora"
     )
 
+
     home_l10 = make_form(
         all_events,
         home
@@ -1562,26 +1759,51 @@ def analyze_event(
         away
     )
 
-    pred = build_prediction(
+
+    prediction = build_prediction(
         home_l10,
         away_l10
     )
 
+
+    h2h = h2h_stats(
+        all_events,
+        home,
+        away
+    )
+
+
     return {
-        "event": event,
-        "home_l10": home_l10,
-        "away_l10": away_l10,
-        "prediction": pred,
+
+        "event":
+            event,
+
+        "home_l10":
+            home_l10,
+
+        "away_l10":
+            away_l10,
+
+        "prediction":
+            prediction,
+
+        "h2h":
+            h2h,
+
         "suggestions":
-            suggestions(pred),
+            suggestions(
+                prediction
+            ),
     }
 
 
 # ============================================================
-# EXIBIÇÃO
+# PLACAR
 # ============================================================
 
-def display_score(event):
+def display_score(
+    event
+):
 
     hs = event.get(
         "home_score"
@@ -1591,221 +1813,464 @@ def display_score(event):
         "away_score"
     )
 
-    if hs is None or aws is None:
+    if (
+        hs is None
+        or
+        aws is None
+    ):
+
         return "x"
 
     return (
-        f"{hs:g} - {aws:g}"
+        f"{hs} - {aws}"
     )
 
+
+# ============================================================
+# CARD DA PARTIDA
+# ============================================================
 
 def render_match_card(
     analysis
 ):
 
-    event = analysis["event"]
+    event = analysis[
+        "event"
+    ]
 
-    pred = analysis["prediction"]
+    pred = analysis[
+        "prediction"
+    ]
 
-    home_l10 = analysis["home_l10"]
+    home_l10 = analysis[
+        "home_l10"
+    ]
 
-    away_l10 = analysis["away_l10"]
+    away_l10 = analysis[
+        "away_l10"
+    ]
 
-    suggestions_list = (
-        analysis["suggestions"]
-    )
+    h2h = analysis[
+        "h2h"
+    ]
 
-    status_type = classify_event(
+    market_rows = analysis[
+        "suggestions"
+    ]
+
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    tipo = classify_event(
         event
     )
 
-    if status_type == "live":
-        badge = "🔴 AO VIVO"
+    if tipo == "live":
 
-    elif status_type == "finished":
-        badge = "✅ FINAL"
+        status_text = "🔴 AO VIVO"
+
+    elif tipo == "finished":
+
+        status_text = "⚫ FINALIZADO"
+
+    elif tipo == "upcoming":
+
+        status_text = "🟢 PRÓXIMO"
 
     else:
-        badge = "🕒 PRÉ-JOGO"
+
+        status_text = "⚪ STATUS DESCONHECIDO"
+
 
     kickoff = parse_kickoff(
         event.get("kickoff")
     )
 
+
     if kickoff:
 
-        hora = kickoff.strftime(
-            "%d/%m %H:%M"
+        horario = kickoff.strftime(
+            "%d/%m/%Y %H:%M"
         )
 
     else:
 
-        hora = "--"
+        horario = "Horário não informado"
 
-    st.markdown(
-        "---"
+
+    # --------------------------------------------------------
+    # TÍTULO
+    # --------------------------------------------------------
+
+    placar = display_score(
+        event
     )
 
-    st.subheader(
-        f"{badge}  "
+    titulo = (
         f"{event.get('home', 'Casa')} "
-        f" {display_score(event)} "
+        f"  {placar}  "
         f"{event.get('away', 'Fora')}"
     )
 
-    st.caption(
-        f"Horário: {hora} | "
-        f"Fonte: {event.get('source', '-')}"
-    )
 
-    col1, col2, col3 = st.columns(3)
+    with st.container(
+        border=True
+    ):
 
-    with col1:
+        st.subheader(
+            titulo
+        )
 
-        st.metric(
+        st.caption(
+            f"{status_text}  •  "
+            f"{horario}  •  "
+            f"Fonte: {event.get('source', '-')}"
+        )
+
+
+        # ----------------------------------------------------
+        # MÉTRICAS
+        # ----------------------------------------------------
+
+        c1, c2, c3, c4 = st.columns(4)
+
+
+        c1.metric(
             "1X",
             pct(
-                pred["1x"] * 100
+                pred["1x"]
+                * 100
             )
         )
 
-    with col2:
 
-        st.metric(
+        c2.metric(
             "X2",
             pct(
-                pred["x2"] * 100
+                pred["x2"]
+                * 100
             )
         )
 
-    with col3:
 
-        st.metric(
-            "BTTS",
+        c3.metric(
+            "BTTS SIM",
             pct(
-                pred["btts_yes"] * 100
+                pred["btts_yes"]
+                * 100
             )
         )
 
-    st.write(
-        f"⚽ Gols esperados: "
-        f"{pred['home_lambda']:.2f} "
-        f"x "
-        f"{pred['away_lambda']:.2f}"
-    )
 
-    st.markdown(
-        "### 📊 L10"
-    )
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-
-        st.markdown(
-            f"**{event.get('home')}**"
+        c4.metric(
+            "OVER 2.5",
+            pct(
+                pred["over25"]
+                * 100
+            )
         )
+
 
         st.write(
-            f"Jogos: {len(home_l10)}"
+            f"⚽ Gols esperados: "
+            f"**{pred['home_lambda']:.2f}** "
+            f"x "
+            f"**{pred['away_lambda']:.2f}**"
         )
 
-        if home_l10:
 
-            tabela = []
-
-            for jogo in home_l10:
-
-                tabela.append({
-                    "Data":
-                        jogo["date"],
-                    "Adversário":
-                        jogo["opponent"],
-                    "GF":
-                        int(jogo["gf"]),
-                    "GA":
-                        int(jogo["ga"]),
-                    "Resultado":
-                        jogo["result"],
-                })
-
-            st.dataframe(
-                pd.DataFrame(tabela),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-
-            st.info(
-                "Sem L10 disponível."
-            )
-
-    with c2:
+        # ----------------------------------------------------
+        # L10
+        # ----------------------------------------------------
 
         st.markdown(
-            f"**{event.get('away')}**"
+            "### 📊 L10"
         )
 
-        st.write(
-            f"Jogos: {len(away_l10)}"
-        )
 
-        if away_l10:
+        col_home, col_away = st.columns(2)
 
-            tabela = []
 
-            for jogo in away_l10:
+        with col_home:
 
-                tabela.append({
-                    "Data":
-                        jogo["date"],
-                    "Adversário":
-                        jogo["opponent"],
-                    "GF":
-                        int(jogo["gf"]),
-                    "GA":
-                        int(jogo["ga"]),
-                    "Resultado":
-                        jogo["result"],
+            st.markdown(
+                f"**{event.get('home')}**"
+            )
+
+            stats = l10_stats(
+                home_l10
+            )
+
+            st.caption(
+                f"Jogos: {stats['jogos']} | "
+                f"V: {stats['vitorias']} | "
+                f"E: {stats['empates']} | "
+                f"D: {stats['derrotas']} | "
+                f"GF: {stats['gf']:.0f} | "
+                f"GA: {stats['ga']:.0f}"
+            )
+
+
+            if home_l10:
+
+                df_home = pd.DataFrame({
+
+                    "Data": [
+                        (
+                            x["date"].strftime(
+                                "%d/%m"
+                            )
+                            if x["date"]
+                            else "-"
+                        )
+                        for x in home_l10
+                    ],
+
+                    "Adversário": [
+                        x["opponent"]
+                        for x in home_l10
+                    ],
+
+                    "Placar": [
+                        f"{x['gf']:.0f}-{x['ga']:.0f}"
+                        for x in home_l10
+                    ],
+
+                    "R": [
+                        x["result"]
+                        for x in home_l10
+                    ],
                 })
 
-            st.dataframe(
-                pd.DataFrame(tabela),
-                use_container_width=True,
-                hide_index=True,
+
+                st.dataframe(
+                    df_home,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            else:
+
+                st.info(
+                    "L10 não disponível."
+                )
+
+
+        with col_away:
+
+            st.markdown(
+                f"**{event.get('away')}**"
             )
 
-        else:
-
-            st.info(
-                "Sem L10 disponível."
+            stats = l10_stats(
+                away_l10
             )
 
-    st.markdown(
-        "### 🎯 Mercados"
-    )
+            st.caption(
+                f"Jogos: {stats['jogos']} | "
+                f"V: {stats['vitorias']} | "
+                f"E: {stats['empates']} | "
+                f"D: {stats['derrotas']} | "
+                f"GF: {stats['gf']:.0f} | "
+                f"GA: {stats['ga']:.0f}"
+            )
 
-    market_rows = []
 
-    for item in suggestions_list:
+            if away_l10:
 
-        market_rows.append({
+                df_away = pd.DataFrame({
 
-            "Mercado":
-                item["Mercado"],
+                    "Data": [
+                        (
+                            x["date"].strftime(
+                                "%d/%m"
+                            )
+                            if x["date"]
+                            else "-"
+                        )
+                        for x in away_l10
+                    ],
 
-            "Probabilidade":
-                f"{item['Probabilidade']:.1f}%",
+                    "Adversário": [
+                        x["opponent"]
+                        for x in away_l10
+                    ],
 
-            "Odd justa":
-                f"{item['Odd justa']:.2f}",
+                    "Placar": [
+                        f"{x['gf']:.0f}-{x['ga']:.0f}"
+                        for x in away_l10
+                    ],
+
+                    "R": [
+                        x["result"]
+                        for x in away_l10
+                    ],
+                })
+
+
+                st.dataframe(
+                    df_away,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            else:
+
+                st.info(
+                    "L10 não disponível."
+                )
+
+
+        # ----------------------------------------------------
+        # MERCADOS
+        # ----------------------------------------------------
+
+        st.markdown(
+            "### 🎯 Mercados"
+        )
+
+
+        market_df = pd.DataFrame({
+
+            "Mercado": [
+                x["Mercado"]
+                for x in market_rows
+            ],
+
+            "Probabilidade": [
+                pct(
+                    x["Probabilidade"]
+                    * 100
+                )
+                for x in market_rows
+            ],
+
+            "Odd justa": [
+                (
+                    f"{x['Odd justa']:.2f}"
+                    if x["Odd justa"]
+                    else "-"
+                )
+                for x in market_rows
+            ],
         })
 
-    st.dataframe(
-        pd.DataFrame(market_rows),
-        use_container_width=True,
-        hide_index=True,
+
+        st.dataframe(
+            market_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+        # ----------------------------------------------------
+        # H2H
+        # ----------------------------------------------------
+
+        with st.expander(
+            f"🤝 H2H — últimos {len(h2h)}"
+        ):
+
+            if h2h:
+
+                h2h_rows = []
+
+                for item in h2h:
+
+                    h2h_rows.append({
+
+                        "Data":
+                            (
+                                event_date(
+                                    item
+                                ).strftime(
+                                    "%d/%m/%Y"
+                                )
+                                if event_date(
+                                    item
+                                )
+                                else "-"
+                            ),
+
+                        "Casa":
+                            item.get(
+                                "home"
+                            ),
+
+                        "Placar":
+                            display_score(
+                                item
+                            ),
+
+                        "Fora":
+                            item.get(
+                                "away"
+                            ),
+
+                        "Fonte":
+                            item.get(
+                                "source"
+                            ),
+                    })
+
+
+                st.dataframe(
+                    pd.DataFrame(
+                        h2h_rows
+                    ),
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            else:
+
+                st.info(
+                    "H2H não encontrado."
+                )
+
+
+# ============================================================
+# STATUS DAS APIs
+# ============================================================
+
+def api_status():
+
+    st.markdown(
+        "### 🔌 Status das fontes"
+    )
+
+
+    c1, c2, c3, c4 = st.columns(4)
+
+
+    c1.write(
+        "🟢 TheSportsDB"
+    )
+
+
+    c2.write(
+        "🟢 football-data.org"
+        if FD_TOKEN
+        else
+        "⚪ football-data.org — sem token"
+    )
+
+
+    c3.write(
+        "🟢 OpenFootAPI"
+        if OPENFOOT_TOKEN
+        else
+        "⚪ OpenFootAPI — sem token"
+    )
+
+
+    c4.write(
+        "🟢 5DollarFootballAPI"
+        if FD5_TOKEN
+        else
+        "⚪ 5DollarFootballAPI — sem token"
     )
 
 
@@ -1820,90 +2285,75 @@ def main():
     )
 
     st.caption(
-        "Scanner de partidas com análise L10 "
-        "e probabilidades estimadas."
+        "Scanner global • L10 • Ao vivo • "
+        "Próximos • Finalizados • "
+        "Probabilidades • Odd justa"
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # SIDEBAR
-    # --------------------------------------------------------
+    # ========================================================
 
     st.sidebar.header(
-        "⚙️ Configurações"
+        "⚙️ Filtros"
     )
+
+
+    mostrar_todas = st.sidebar.checkbox(
+        "🌎 Mostrar todas as partidas",
+        value=True
+    )
+
 
     mostrar_ao_vivo = st.sidebar.checkbox(
-        "🔴 Mostrar ao vivo",
+        "🔴 Ao vivo",
         value=True
     )
+
 
     mostrar_proximos = st.sidebar.checkbox(
-        "🕒 Mostrar próximos",
+        "🟢 Próximos",
         value=True
     )
 
+
     mostrar_finalizados = st.sidebar.checkbox(
-        "✅ Mostrar finalizados",
+        "⚫ Finalizados",
         value=False
     )
 
+
     limite = st.sidebar.slider(
-        "Quantidade de jogos",
+        "Quantidade de partidas",
         min_value=5,
         max_value=100,
-        value=30
+        value=100
     )
 
+
     if st.sidebar.button(
-        "🔄 Atualizar agora"
+        "🔄 Atualizar agora",
+        use_container_width=True
     ):
 
         st.rerun()
 
-    # --------------------------------------------------------
-    # STATUS DAS APIS
-    # --------------------------------------------------------
+
+    # ========================================================
+    # API STATUS
+    # ========================================================
 
     with st.expander(
-        "🔌 Status das APIs",
-        expanded=False
+        "🔌 APIs"
     ):
 
-        st.write(
-            "TheSportsDB: "
-            "✅ disponível"
-        )
+        api_status()
 
-        st.write(
-            "football-data.org: "
-            + (
-                "✅ token configurado"
-                if FD_TOKEN
-                else "⚠️ token não configurado"
-            )
-        )
 
-        st.write(
-            "OpenFootAPI: "
-            + (
-                "✅ token configurado"
-                if OPENFOOT_TOKEN
-                else "⚠️ token não configurado"
-            )
-        )
-
-        st.write(
-            "5DollarFootballAPI: "
-            + (
-                "✅ token configurado"
-                if FD5_TOKEN
-                else "⚠️ token não configurado"
-            )
-        )
-
-    # --------------------------------------------------------
-    # CARREGAMENTO
-    # --------------------------------------------------------
+    # ========================================================
+    # CARREGAR
+    # ========================================================
 
     with st.spinner(
         "Buscando partidas..."
@@ -1911,24 +2361,27 @@ def main():
 
         events = load_global_events()
 
+
     if not events:
 
         st.warning(
-            "Nenhuma partida foi encontrada."
+            "Nenhuma partida encontrada."
         )
 
         st.info(
-            "Verifique as chaves das APIs "
-            "e tente atualizar novamente."
+            "Verifique as APIs e tokens configurados "
+            "no Streamlit Cloud."
         )
 
         return
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # FILTRO
-    # --------------------------------------------------------
+    # ========================================================
 
     filtered = []
+
 
     for event in events:
 
@@ -1936,77 +2389,180 @@ def main():
             event
         )
 
-        if tipo == "live" and mostrar_ao_vivo:
-            filtered.append(event)
+
+        # ----------------------------------------------------
+        # MODO TODAS
+        # ----------------------------------------------------
+
+        if mostrar_todas:
+
+            filtered.append(
+                event
+            )
+
+            continue
+
+
+        # ----------------------------------------------------
+        # FILTRO NORMAL
+        # ----------------------------------------------------
+
+        if (
+            tipo == "live"
+            and
+            mostrar_ao_vivo
+        ):
+
+            filtered.append(
+                event
+            )
+
 
         elif (
             tipo == "upcoming"
-            and mostrar_proximos
+            and
+            mostrar_proximos
         ):
-            filtered.append(event)
+
+            filtered.append(
+                event
+            )
+
 
         elif (
             tipo == "finished"
-            and mostrar_finalizados
+            and
+            mostrar_finalizados
         ):
-            filtered.append(event)
 
-    # --------------------------------------------------------
-    # ORDENAR
-    # --------------------------------------------------------
-
-    filtered.sort(
-        key=lambda x: (
-            parse_kickoff(
-                x.get("kickoff")
+            filtered.append(
+                event
             )
-            or datetime.max.replace(
-                tzinfo=timezone.utc
+
+
+        # ----------------------------------------------------
+        # STATUS DESCONHECIDO
+        # ----------------------------------------------------
+        # Nunca esconder partidas desconhecidas.
+        #
+        # Isso resolve o problema de APIs que enviam
+        # status diferentes.
+        #
+
+        elif (
+            tipo == "unknown"
+            and
+            mostrar_todas
+        ):
+
+            filtered.append(
+                event
             )
-        )
-    )
 
-    filtered = filtered[:limite]
 
-    # --------------------------------------------------------
+    # ========================================================
+    # LIMITE
+    # ========================================================
+
+    filtered = filtered[
+        :limite
+    ]
+
+
+    # ========================================================
     # RESUMO
-    # --------------------------------------------------------
+    # ========================================================
 
     st.success(
-        f"{len(events)} partidas encontradas | "
-        f"{len(filtered)} exibidas"
+        f"**{len(events)} partidas encontradas** "
+        f"| "
+        f"**{len(filtered)} exibidas**"
     )
 
-    # --------------------------------------------------------
-    # TABELA RESUMIDA
-    # --------------------------------------------------------
 
-    resumo = []
+    # ========================================================
+    # CONTADORES
+    # ========================================================
+
+    live_count = sum(
+        classify_event(x) == "live"
+        for x in events
+    )
+
+    upcoming_count = sum(
+        classify_event(x) == "upcoming"
+        for x in events
+    )
+
+    finished_count = sum(
+        classify_event(x) == "finished"
+        for x in events
+    )
+
+    unknown_count = sum(
+        classify_event(x) == "unknown"
+        for x in events
+    )
+
+
+    c1, c2, c3, c4 = st.columns(4)
+
+
+    c1.metric(
+        "🔴 Ao vivo",
+        live_count
+    )
+
+
+    c2.metric(
+        "🟢 Próximos",
+        upcoming_count
+    )
+
+
+    c3.metric(
+        "⚫ Finalizados",
+        finished_count
+    )
+
+
+    c4.metric(
+        "⚪ Outros",
+        unknown_count
+    )
+
+
+    # ========================================================
+    # TABELA RESUMO
+    # ========================================================
+
+    summary = []
+
 
     for event in filtered:
-
-        tipo = classify_event(
-            event
-        )
 
         kickoff = parse_kickoff(
             event.get("kickoff")
         )
 
-        resumo.append({
+
+        summary.append({
 
             "Status":
                 (
-                    "🔴 AO VIVO"
-                    if tipo == "live"
+                    "🔴 LIVE"
+                    if classify_event(event) == "live"
                     else
-                    "🕒 PRÉ-JOGO"
-                    if tipo == "upcoming"
+                    "⚫ FINAL"
+                    if classify_event(event) == "finished"
                     else
-                    "✅ FINAL"
+                    "🟢 PRÓXIMO"
+                    if classify_event(event) == "upcoming"
+                    else
+                    "⚪ OUTRO"
                 ),
 
-            "Data":
+            "Data/Hora":
                 (
                     kickoff.strftime(
                         "%d/%m %H:%M"
@@ -2017,8 +2573,7 @@ def main():
 
             "Casa":
                 event.get(
-                    "home",
-                    "Casa"
+                    "home"
                 ),
 
             "Placar":
@@ -2028,38 +2583,53 @@ def main():
 
             "Fora":
                 event.get(
-                    "away",
-                    "Fora"
+                    "away"
                 ),
 
             "Fonte":
                 event.get(
-                    "source",
-                    "-"
+                    "source"
                 ),
         })
 
-    if resumo:
+
+    if summary:
 
         st.markdown(
-            "### 📋 Partidas"
+            "### 📋 Partidas encontradas"
         )
 
         st.dataframe(
-            pd.DataFrame(resumo),
+            pd.DataFrame(
+                summary
+            ),
             use_container_width=True,
-            hide_index=True,
+            hide_index=True
         )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # ANÁLISES
-    # --------------------------------------------------------
+    # ========================================================
 
     st.markdown(
         "## 📊 Análises"
     )
 
-    for event in filtered:
+
+    if not filtered:
+
+        st.warning(
+            "Nenhuma partida passou pelos filtros."
+        )
+
+        return
+
+
+    for index, event in enumerate(
+        filtered,
+        start=1
+    ):
 
         try:
 
@@ -2075,27 +2645,37 @@ def main():
         except Exception as error:
 
             st.error(
-                "Erro ao analisar "
+                f"Erro analisando "
                 f"{event.get('home')} x "
                 f"{event.get('away')}: "
                 f"{error}"
             )
+
+            with st.expander(
+                "Detalhes do erro"
+            ):
+
+                st.code(
+                    traceback.format_exc()
+                )
 
 
 # ============================================================
 # EXECUÇÃO SEGURA
 # ============================================================
 
-try:
+if __name__ == "__main__":
 
-    main()
+    try:
 
-except Exception as error:
+        main()
 
-    st.error(
-        "❌ O aplicativo encontrou um erro."
-    )
+    except Exception as error:
 
-    st.code(
-        traceback.format_exc()
-    )
+        st.error(
+            "O aplicativo encontrou um erro."
+        )
+
+        st.exception(
+            error
+        )
