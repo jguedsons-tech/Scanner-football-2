@@ -1,9 +1,3 @@
-# ============================================================
-# GLOBAL FOOTBALL SCANNER
-# 4 APIs + HISTÓRICO UNIFICADO + L10 + PROBABILIDADES
-# + OPENROUTER GRATUITO
-# ============================================================
-
 import os
 import re
 import math
