@@ -1,793 +1,1266 @@
 # ============================================================
-# CARD DO JOGO — CORRIGIDO
+# GLOBAL FOOTBALL SCANNER
+# L10 OBRIGATÓRIO — ÚLTIMOS 10 JOGOS
+# AO VIVO + PRÉ-JOGO
 # ============================================================
 
-def render_match_card(
-    row,
-    idx,
-    live_mode=False
+import os
+import math
+import re
+import traceback
+
+from datetime import datetime, timedelta, date, timezone
+from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import requests
+import streamlit as st
+
+
+# ============================================================
+# CONFIGURAÇÃO DO STREAMLIT
+# ============================================================
+
+st.set_page_config(
+    page_title="Global Football Scanner",
+    page_icon="⚽",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+TSDB_KEY = os.getenv(
+    "THESPORTSDB_API_KEY",
+    "123"
+)
+
+TSDB_BASE = (
+    f"https://www.thesportsdb.com/api/v1/json/{TSDB_KEY}"
+)
+
+FD_TOKEN = os.getenv(
+    "FOOTBALL_DATA_API_TOKEN",
+    ""
+)
+
+FD_BASE = "https://api.football-data.org/v4"
+
+FD5_TOKEN = os.getenv(
+    "FIVEDOLLAR_FOOTBALL_API_KEY",
+    os.getenv(
+        "FIVEDOLLAR_FOOTBALLAPI_KEY",
+        ""
+    )
+)
+
+FD5_BASE = "https://api.5dollarfootballapi.com/v1"
+
+OPENFOOT_TOKEN = os.getenv(
+    "OPENFOOT_API_KEY",
+    ""
+)
+
+OPENFOOT_BASE = "https://openfootapi.com/v1"
+
+TIMEOUT = 15
+
+CACHE_TTL = 1800
+
+CALENDAR_TTL = 20
+
+BRT = ZoneInfo("America/Sao_Paulo")
+
+# ============================================================
+# L10 É OBRIGATÓRIO
+# ============================================================
+
+L10_N = 10
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+LIVE_STATUSES = {
+    "LIVE",
+    "IN_PLAY",
+    "1H",
+    "2H",
+    "HT",
+    "ET",
+    "P",
+    "LIVE",
+}
+
+FINAL_STATUSES = {
+    "FT",
+    "AET",
+    "PEN",
+    "FINISHED",
+    "FINAL",
+    "AFTER_EXTRA_TIME",
+    "AFTER_PENALTIES",
+}
+
+PRE_STATUSES = {
+    "NS",
+    "TBD",
+    "SCHEDULED",
+    "TIMED",
+    "UPCOMING",
+}
+
+
+# ============================================================
+# FUNÇÕES BÁSICAS
+# ============================================================
+
+def safe_float(value, default=0.0):
+
+    try:
+
+        if value is None:
+            return default
+
+        if isinstance(value, str):
+
+            value = (
+                value
+                .replace("%", "")
+                .replace(",", ".")
+                .strip()
+            )
+
+            if not value:
+                return default
+
+        return float(value)
+
+    except Exception:
+
+        return default
+
+
+def pct(value):
+
+    try:
+        return f"{safe_float(value):.1f}%"
+
+    except Exception:
+
+        return "0.0%"
+
+
+def norm_status(status):
+
+    if status is None:
+        return ""
+
+    return (
+        str(status)
+        .strip()
+        .upper()
+        .replace("-", "_")
+        .replace(" ", "_")
+    )
+
+
+def is_live_status(status):
+
+    return norm_status(status) in LIVE_STATUSES
+
+
+def parse_kickoff(value):
+
+    if not value:
+        return None
+
+    try:
+
+        if isinstance(value, datetime):
+
+            dt = value
+
+        else:
+
+            text = str(value).strip()
+
+            if text.endswith("Z"):
+
+                text = text[:-1] + "+00:00"
+
+            dt = datetime.fromisoformat(text)
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(BRT)
+
+    except Exception:
+
+        return None
+
+
+def classify_event(event):
+
+    status = norm_status(
+        event.get("status", "")
+    )
+
+    if status in LIVE_STATUSES:
+
+        return "live"
+
+    if status in FINAL_STATUSES:
+
+        return "finished"
+
+    if status in PRE_STATUSES:
+
+        return "upcoming"
+
+    kickoff = parse_kickoff(
+        event.get("kickoff")
+    )
+
+    if kickoff:
+
+        now = datetime.now(BRT)
+
+        if kickoff <= now:
+
+            return "live"
+
+        return "upcoming"
+
+    return "unknown"
+
+
+# ============================================================
+# POISSON
+# ============================================================
+
+def poisson_pmf(k, lam):
+
+    try:
+
+        lam = max(
+            0.001,
+            safe_float(lam)
+        )
+
+        return (
+            math.exp(-lam)
+            * (lam ** k)
+            / math.factorial(k)
+        )
+
+    except Exception:
+
+        return 0.0
+
+
+def model_probs(
+    home_lambda,
+    away_lambda
 ):
 
-    pred = row["_pred"]
-
-    ev = row["_event"]
-
-    # ========================================================
-    # PLACAR
-    # ========================================================
-
-    placar = row.get(
-        "Placar",
-        "-"
+    home_lambda = max(
+        0.01,
+        safe_float(home_lambda, 1.0)
     )
 
-    if placar == "-":
-        placar_exibicao = "x"
-    else:
-        placar_exibicao = placar
-
-    # CORREÇÃO DO ERRO DE F-STRING
-    title = (
-        f"{ev.get('home', 'Casa')}  "
-        f"{placar_exibicao}  "
-        f"{ev.get('away', 'Fora')}"
+    away_lambda = max(
+        0.01,
+        safe_float(away_lambda, 1.0)
     )
 
-    status_icon = (
-        "🟢"
-        if live_mode
-        else
-        "🔵"
+    home_win = 0.0
+    draw = 0.0
+    away_win = 0.0
+    btts = 0.0
+    over25 = 0.0
+    under25 = 0.0
+    over15 = 0.0
+    under35 = 0.0
+
+    for hg in range(11):
+
+        ph = poisson_pmf(
+            hg,
+            home_lambda
+        )
+
+        for ag in range(11):
+
+            pa = poisson_pmf(
+                ag,
+                away_lambda
+            )
+
+            p = ph * pa
+
+            if hg > ag:
+                home_win += p
+
+            elif hg == ag:
+                draw += p
+
+            else:
+                away_win += p
+
+            total = hg + ag
+
+            if hg >= 1 and ag >= 1:
+                btts += p
+
+            if total >= 3:
+                over25 += p
+            else:
+                under25 += p
+
+            if total >= 2:
+                over15 += p
+
+            if total <= 3:
+                under35 += p
+
+    total_prob = (
+        home_win
+        + draw
+        + away_win
     )
 
-    # ========================================================
-    # L10
-    # ========================================================
+    if total_prob <= 0:
+        total_prob = 1.0
 
-    home_l10 = (
-        pred.get("home_l10")
-        or {}
+    home_win /= total_prob
+    draw /= total_prob
+    away_win /= total_prob
+    btts /= total_prob
+    over25 /= total_prob
+    under25 /= total_prob
+    over15 /= total_prob
+    under35 /= total_prob
+
+    return {
+
+        "home_win": home_win,
+
+        "draw": draw,
+
+        "away_win": away_win,
+
+        "1x": home_win + draw,
+
+        "x2": draw + away_win,
+
+        "btts_yes": btts,
+
+        "btts_no": 1 - btts,
+
+        "over15": over15,
+
+        "over25": over25,
+
+        "under25": under25,
+
+        "under35": under35,
+
+    }
+
+
+# ============================================================
+# HTTP SEGURO
+# ============================================================
+
+def request_json(
+    url,
+    headers=None,
+    params=None,
+    timeout=TIMEOUT
+):
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers or {},
+            params=params or {},
+            timeout=timeout
+        )
+
+        if response.status_code != 200:
+
+            return None
+
+        return response.json()
+
+    except Exception:
+
+        return None
+
+
+def request_openfoot(
+    url,
+    headers=None,
+    params=None,
+    timeout=TIMEOUT
+):
+
+    return request_json(
+        url,
+        headers=headers,
+        params=params,
+        timeout=timeout
     )
 
-    away_l10 = (
-        pred.get("away_l10")
-        or {}
+
+# ============================================================
+# FUNÇÕES DE FONTES
+# ============================================================
+
+@st.cache_data(
+    ttl=CALENDAR_TTL,
+    show_spinner=False
+)
+def tsdb_day(day):
+
+    url = (
+        f"{TSDB_BASE}/"
+        f"eventsday.php"
     )
 
-    home_form = (
-        pred.get("home_form")
-        or []
+    data = request_json(
+        url,
+        params={
+            "d": day,
+            "s": "Soccer"
+        }
     )
 
-    away_form = (
-        pred.get("away_form")
-        or []
+    if not data:
+
+        return []
+
+    return data.get(
+        "events",
+        []
+    ) or []
+
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def tsdb_team_search(team):
+
+    if not team:
+        return []
+
+    url = (
+        f"{TSDB_BASE}/"
+        f"searchteams.php"
     )
 
-    # ========================================================
-    # CARD
-    # ========================================================
+    data = request_json(
+        url,
+        params={
+            "t": team
+        }
+    )
 
-    with st.container(
-        border=True
+    if not data:
+
+        return []
+
+    return data.get(
+        "teams",
+        []
+    ) or []
+
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def tsdb_last(team_id):
+
+    if not team_id:
+        return []
+
+    url = (
+        f"{TSDB_BASE}/"
+        f"eventslast.php"
+    )
+
+    data = request_json(
+        url,
+        params={
+            "id": team_id
+        }
+    )
+
+    if not data:
+
+        return []
+
+    return data.get(
+        "results",
+        []
+    ) or []
+
+
+# ============================================================
+# NORMALIZAÇÃO THESPORTSDB
+# ============================================================
+
+def normalize_tsdb_event(event):
+
+    if not event:
+        return None
+
+    try:
+
+        home_id = event.get(
+            "idHomeTeam"
+        )
+
+        away_id = event.get(
+            "idAwayTeam"
+        )
+
+        home = (
+            event.get("strHomeTeam")
+            or "Casa"
+        )
+
+        away = (
+            event.get("strAwayTeam")
+            or "Fora"
+        )
+
+        date_value = (
+            event.get("dateEvent")
+            or ""
+        )
+
+        time_value = (
+            event.get("strTime")
+            or "00:00:00"
+        )
+
+        kickoff = None
+
+        if date_value:
+
+            kickoff = (
+                f"{date_value}T"
+                f"{time_value}"
+            )
+
+        home_score = event.get(
+            "intHomeScore"
+        )
+
+        away_score = event.get(
+            "intAwayScore"
+        )
+
+        status = (
+            event.get("strStatus")
+            or ""
+        )
+
+        return {
+
+            "id": str(
+                event.get(
+                    "idEvent",
+                    ""
+                )
+            ),
+
+            "home": home,
+
+            "away": away,
+
+            "home_id": str(
+                home_id or ""
+            ),
+
+            "away_id": str(
+                away_id or ""
+            ),
+
+            "kickoff": kickoff,
+
+            "status": status,
+
+            "home_score": home_score,
+
+            "away_score": away_score,
+
+            "source": "TheSportsDB",
+
+            "raw": event,
+
+        }
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# FOOTBALL-DATA
+# ============================================================
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def fd_competitions():
+
+    if not FD_TOKEN:
+
+        return []
+
+    data = request_json(
+        f"{FD_BASE}/competitions",
+        headers={
+            "X-Auth-Token": FD_TOKEN
+        }
+    )
+
+    if not data:
+
+        return []
+
+    return data.get(
+        "competitions",
+        []
+    ) or []
+
+
+@st.cache_data(
+    ttl=CALENDAR_TTL,
+    show_spinner=False
+)
+def fd_matches(
+    date_from,
+    date_to
+):
+
+    if not FD_TOKEN:
+
+        return []
+
+    data = request_json(
+        f"{FD_BASE}/matches",
+        headers={
+            "X-Auth-Token": FD_TOKEN
+        },
+        params={
+            "dateFrom": date_from,
+            "dateTo": date_to
+        }
+    )
+
+    if not data:
+
+        return []
+
+    return data.get(
+        "matches",
+        []
+    ) or []
+
+
+def normalize_fd_event(event):
+
+    if not event:
+
+        return None
+
+    try:
+
+        home = (
+            event.get(
+                "homeTeam",
+                {}
+            ) or {}
+        )
+
+        away = (
+            event.get(
+                "awayTeam",
+                {}
+            ) or {}
+        )
+
+        score = (
+            event.get(
+                "score",
+                {}
+            ) or {}
+        )
+
+        full_time = (
+            score.get(
+                "fullTime",
+                {}
+            ) or {}
+        )
+
+        return {
+
+            "id": str(
+                event.get(
+                    "id",
+                    ""
+                )
+            ),
+
+            "home": (
+                home.get("name")
+                or "Casa"
+            ),
+
+            "away": (
+                away.get("name")
+                or "Fora"
+            ),
+
+            "home_id": str(
+                home.get("id")
+                or ""
+            ),
+
+            "away_id": str(
+                away.get("id")
+                or ""
+            ),
+
+            "kickoff": (
+                event.get(
+                    "utcDate"
+                )
+            ),
+
+            "status": (
+                event.get(
+                    "status",
+                    ""
+                )
+            ),
+
+            "home_score": (
+                full_time.get(
+                    "home"
+                )
+            ),
+
+            "away_score": (
+                full_time.get(
+                    "away"
+                )
+            ),
+
+            "source": (
+                "football-data.org"
+            ),
+
+            "raw": event,
+
+        }
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# OPENFOOT
+# ============================================================
+
+@st.cache_data(
+    ttl=CALENDAR_TTL,
+    show_spinner=False
+)
+def openfoot_matches():
+
+    if not OPENFOOT_TOKEN:
+
+        return []
+
+    data = request_openfoot(
+        f"{OPENFOOT_BASE}/matches",
+        headers={
+            "Authorization":
+                f"Bearer {OPENFOOT_TOKEN}"
+        }
+    )
+
+    if not data:
+
+        return []
+
+    if isinstance(
+        data,
+        list
     ):
 
-        # ====================================================
-        # CABEÇALHO
-        # ====================================================
+        return data
 
-        c1, c2, c3 = st.columns(
-            [5, 2, 3]
+    return (
+        data.get("matches")
+        or data.get("data")
+        or []
+    )
+
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def openfoot_team_search(team):
+
+    if not OPENFOOT_TOKEN:
+        return []
+
+    data = request_openfoot(
+        f"{OPENFOOT_BASE}/teams",
+        headers={
+            "Authorization":
+                f"Bearer {OPENFOOT_TOKEN}"
+        },
+        params={
+            "search": team
+        }
+    )
+
+    if not data:
+        return []
+
+    if isinstance(
+        data,
+        list
+    ):
+        return data
+
+    return (
+        data.get("teams")
+        or data.get("data")
+        or []
+    )
+
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def openfoot_team_matches(
+    team_id
+):
+
+    if not OPENFOOT_TOKEN:
+        return []
+
+    data = request_openfoot(
+        f"{OPENFOOT_BASE}/teams/"
+        f"{team_id}/matches",
+        headers={
+            "Authorization":
+                f"Bearer {OPENFOOT_TOKEN}"
+        }
+    )
+
+    if not data:
+        return []
+
+    if isinstance(
+        data,
+        list
+    ):
+        return data
+
+    return (
+        data.get("matches")
+        or data.get("data")
+        or []
+    )
+
+
+def normalize_openfoot_event(
+    event
+):
+
+    if not event:
+        return None
+
+    try:
+
+        home = (
+            event.get("homeTeam")
+            or event.get("home")
+            or {}
         )
 
-        with c1:
-
-            st.markdown(
-                f"### "
-                f"{status_icon} "
-                f"{title}"
-            )
-
-            st.caption(
-                f"{row.get('Liga', '-')} • "
-                f"{row.get('Horário BRT', '-')} • "
-                f"Fonte: {row.get('Fonte', '-')}"
-            )
-
-        with c2:
-
-            st.metric(
-                "Melhor opção",
-                row.get(
-                    "Sugestão",
-                    "-"
-                ),
-                row.get(
-                    "Prob.",
-                    "-"
-                )
-            )
-
-        with c3:
-
-            st.metric(
-                "Confiança",
-                row.get(
-                    "Confiança",
-                    "-"
-                )
-            )
-
-        # ====================================================
-        # MERCADOS
-        # ====================================================
-
-        b1, b2, b3, b4, b5 = st.columns(5)
-
-        b1.metric(
-            "Casa",
-            row.get(
-                "Casa",
-                "-"
-            )
+        away = (
+            event.get("awayTeam")
+            or event.get("away")
+            or {}
         )
 
-        b2.metric(
-            "Empate",
-            row.get(
-                "Empate",
-                "-"
-            )
-        )
-
-        b3.metric(
-            "Fora",
-            row.get(
-                "Fora",
-                "-"
-            )
-        )
-
-        b4.metric(
-            "BTTS",
-            row.get(
-                "BTTS",
-                "-"
-            )
-        )
-
-        b5.metric(
-            "O2.5",
-            row.get(
-                "O2.5",
-                "-"
-            )
-        )
-
-        # ====================================================
-        # L10
-        # ====================================================
-
-        st.markdown(
-            "## 📊 L10 — Últimos 10 jogos"
-        )
-
-        home_games = home_l10.get(
-            "jogos",
-            0
-        )
-
-        away_games = away_l10.get(
-            "jogos",
-            0
-        )
-
-        if home_games < 10:
-
-            st.warning(
-                f"⚠️ {ev.get('home', 'Casa')}: "
-                f"{home_games}/10 jogos encontrados. "
-                f"O sistema não inventa os jogos faltantes."
-            )
-
-        if away_games < 10:
-
-            st.warning(
-                f"⚠️ {ev.get('away', 'Fora')}: "
-                f"{away_games}/10 jogos encontrados. "
-                f"O sistema não inventa os jogos faltantes."
-            )
-
-        # ====================================================
-        # CASA — L10
-        # ====================================================
-
-        st.markdown(
-            f"### 🏠 "
-            f"{ev.get('home', 'Casa')} — L10"
-        )
-
-        hcols = st.columns(8)
-
-        hcols[0].metric(
-            "J",
-            home_l10.get(
-                "jogos",
-                0
-            )
-        )
-
-        hcols[1].metric(
-            "V",
-            home_l10.get(
-                "vitorias",
-                0
-            )
-        )
-
-        hcols[2].metric(
-            "E",
-            home_l10.get(
-                "empates",
-                0
-            )
-        )
-
-        hcols[3].metric(
-            "D",
-            home_l10.get(
-                "derrotas",
-                0
-            )
-        )
-
-        hcols[4].metric(
-            "P",
-            home_l10.get(
-                "pontos",
-                0
-            )
-        )
-
-        hcols[5].metric(
-            "GF",
-            int(
-                home_l10.get(
-                    "gf",
-                    0
-                )
-            )
-        )
-
-        hcols[6].metric(
-            "GA",
-            int(
-                home_l10.get(
-                    "ga",
-                    0
-                )
-            )
-        )
-
-        hcols[7].metric(
-            "Média GF",
-            f"{home_l10.get('media_gf', 0):.2f}"
-        )
-
-        # ====================================================
-        # OUTRAS ESTATÍSTICAS CASA
-        # ====================================================
-
-        hc1, hc2, hc3, hc4, hc5, hc6 = st.columns(6)
-
-        hc1.metric(
-            "BTTS",
-            f"{home_l10.get('btts', 0)}/"
-            f"{home_games}"
-        )
-
-        hc2.metric(
-            "Over 1.5",
-            f"{home_l10.get('over15', 0)}/"
-            f"{home_games}"
-        )
-
-        hc3.metric(
-            "Over 2.5",
-            f"{home_l10.get('over25', 0)}/"
-            f"{home_games}"
-        )
-
-        hc4.metric(
-            "Over 3.5",
-            f"{home_l10.get('over35', 0)}/"
-            f"{home_games}"
-        )
-
-        hc5.metric(
-            "Clean Sheet",
-            f"{home_l10.get('clean_sheets', 0)}/"
-            f"{home_games}"
-        )
-
-        hc6.metric(
-            "Sem marcar",
-            f"{home_l10.get('sem_marcar', 0)}/"
-            f"{home_games}"
-        )
-
-        st.caption(
-            f"⚽ Gols: "
-            f"{home_l10.get('media_gf', 0):.2f} "
-            f"marcados | "
-            f"{home_l10.get('media_ga', 0):.2f} "
-            f"sofridos"
-        )
-
-        # ====================================================
-        # ESCANTEIOS CASA
-        # ====================================================
-
-        if home_l10.get(
-            "corners_for"
-        ) is not None:
-
-            st.caption(
-                f"🚩 Escanteios: "
-                f"{home_l10['corners_for']:.2f} "
-                f"a favor | "
-                f"{home_l10['corners_against']:.2f} "
-                f"contra | "
-                f"{home_l10['corners_total']:.2f} "
-                f"total"
-            )
-
-        # ====================================================
-        # CARTÕES CASA
-        # ====================================================
-
-        if home_l10.get(
-            "yellow_for"
-        ) is not None:
-
-            st.caption(
-                f"🟨 Cartões: "
-                f"{home_l10['yellow_for']:.2f} "
-                f"por jogo"
-            )
-
-        # ====================================================
-        # FORA — L10
-        # ====================================================
-
-        st.markdown(
-            f"### ✈️ "
-            f"{ev.get('away', 'Fora')} — L10"
-        )
-
-        acols = st.columns(8)
-
-        acols[0].metric(
-            "J",
-            away_l10.get(
-                "jogos",
-                0
-            )
-        )
-
-        acols[1].metric(
-            "V",
-            away_l10.get(
-                "vitorias",
-                0
-            )
-        )
-
-        acols[2].metric(
-            "E",
-            away_l10.get(
-                "empates",
-                0
-            )
-        )
-
-        acols[3].metric(
-            "D",
-            away_l10.get(
-                "derrotas",
-                0
-            )
-        )
-
-        acols[4].metric(
-            "P",
-            away_l10.get(
-                "pontos",
-                0
-            )
-        )
-
-        acols[5].metric(
-            "GF",
-            int(
-                away_l10.get(
-                    "gf",
-                    0
-                )
-            )
-        )
-
-        acols[6].metric(
-            "GA",
-            int(
-                away_l10.get(
-                    "ga",
-                    0
-                )
-            )
-        )
-
-        acols[7].metric(
-            "Média GF",
-            f"{away_l10.get('media_gf', 0):.2f}"
-        )
-
-        # ====================================================
-        # OUTRAS ESTATÍSTICAS FORA
-        # ====================================================
-
-        ac1, ac2, ac3, ac4, ac5, ac6 = st.columns(6)
-
-        ac1.metric(
-            "BTTS",
-            f"{away_l10.get('btts', 0)}/"
-            f"{away_games}"
-        )
-
-        ac2.metric(
-            "Over 1.5",
-            f"{away_l10.get('over15', 0)}/"
-            f"{away_games}"
-        )
-
-        ac3.metric(
-            "Over 2.5",
-            f"{away_l10.get('over25', 0)}/"
-            f"{away_games}"
-        )
-
-        ac4.metric(
-            "Over 3.5",
-            f"{away_l10.get('over35', 0)}/"
-            f"{away_games}"
-        )
-
-        ac5.metric(
-            "Clean Sheet",
-            f"{away_l10.get('clean_sheets', 0)}/"
-            f"{away_games}"
-        )
-
-        ac6.metric(
-            "Sem marcar",
-            f"{away_l10.get('sem_marcar', 0)}/"
-            f"{away_games}"
-        )
-
-        st.caption(
-            f"⚽ Gols: "
-            f"{away_l10.get('media_gf', 0):.2f} "
-            f"marcados | "
-            f"{away_l10.get('media_ga', 0):.2f} "
-            f"sofridos"
-        )
-
-        # ====================================================
-        # ESCANTEIOS FORA
-        # ====================================================
-
-        if away_l10.get(
-            "corners_for"
-        ) is not None:
-
-            st.caption(
-                f"🚩 Escanteios: "
-                f"{away_l10['corners_for']:.2f} "
-                f"a favor | "
-                f"{away_l10['corners_against']:.2f} "
-                f"contra | "
-                f"{away_l10['corners_total']:.2f} "
-                f"total"
-            )
-
-        # ====================================================
-        # CARTÕES FORA
-        # ====================================================
-
-        if away_l10.get(
-            "yellow_for"
-        ) is not None:
-
-            st.caption(
-                f"🟨 Cartões: "
-                f"{away_l10['yellow_for']:.2f} "
-                f"por jogo"
-            )
-
-        # ====================================================
-        # 10 JOGOS EXATOS
-        # ====================================================
-
-        with st.expander(
-            "📋 Ver os jogos usados no L10",
-            expanded=False
+        if isinstance(
+            home,
+            str
         ):
 
-            def tabela_l10(
-                rows
-            ):
+            home_name = home
+            home_id = ""
 
-                data = []
+        else:
 
-                for i, r in enumerate(
-                    rows[:L10_N],
-                    1
-                ):
-
-                    gf = safe_float(
-                        r.get(
-                            "gf"
-                        ),
-                        0
-                    )
-
-                    ga = safe_float(
-                        r.get(
-                            "ga"
-                        ),
-                        0
-                    )
-
-                    data.append({
-
-                        "#":
-                            i,
-
-                        "Data":
-                            r.get(
-                                "date",
-                                ""
-                            ),
-
-                        "Adversário":
-                            r.get(
-                                "opponent",
-                                ""
-                            ),
-
-                        "Casa/Fora":
-                            (
-                                "Casa"
-                                if r.get(
-                                    "home"
-                                )
-                                else
-                                "Fora"
-                            ),
-
-                        "Placar":
-                            (
-                                f"{int(gf)}"
-                                f"-"
-                                f"{int(ga)}"
-                            ),
-
-                        "Resultado":
-                            r.get(
-                                "result",
-                                "-"
-                            ),
-
-                        "GF":
-                            gf,
-
-                        "GA":
-                            ga
-                    })
-
-                return pd.DataFrame(
-                    data
+            home_name = (
+                home.get("name")
+                or home.get(
+                    "shortName",
+                    "Casa"
                 )
-
-            # =================================================
-            # CASA
-            # =================================================
-
-            st.markdown(
-                f"**🏠 {ev.get('home', 'Casa')} — "
-                f"{len(home_form[:L10_N])}/10 jogos**"
             )
 
-            if home_form:
-
-                st.dataframe(
-                    tabela_l10(
-                        home_form
-                    ),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            else:
-
-                st.info(
-                    "Nenhum jogo histórico "
-                    "encontrado para este time."
-                )
-
-            # =================================================
-            # FORA
-            # =================================================
-
-            st.markdown(
-                f"**✈️ {ev.get('away', 'Fora')} — "
-                f"{len(away_form[:L10_N])}/10 jogos**"
+            home_id = str(
+                home.get("id")
+                or ""
             )
 
-            if away_form:
-
-                st.dataframe(
-                    tabela_l10(
-                        away_form
-                    ),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            else:
-
-                st.info(
-                    "Nenhum jogo histórico "
-                    "encontrado para este time."
-                )
-
-        # ====================================================
-        # AO VIVO
-        # ====================================================
-
-        if live_mode:
-
-            if ev.get(
-                "minute"
-            ) is not None:
-
-                st.caption(
-                    f"⏱️ Minuto: "
-                    f"{ev.get('minute')} "
-                    f"| Placar: "
-                    f"{row.get('Placar', '-')}"
-                )
-
-            live_stats = []
-
-            for key, label in [
-
-                (
-                    "home_corners",
-                    "Esc. casa"
-                ),
-
-                (
-                    "away_corners",
-                    "Esc. fora"
-                ),
-
-                (
-                    "home_shots",
-                    "Chutes casa"
-                ),
-
-                (
-                    "away_shots",
-                    "Chutes fora"
-                ),
-
-                (
-                    "home_dangerous",
-                    "Ataques perigosos casa"
-                ),
-
-                (
-                    "away_dangerous",
-                    "Ataques perigosos fora"
-                )
-
-            ]:
-
-                if ev.get(
-                    key
-                ) is not None:
-
-                    live_stats.append(
-                        f"{label}: "
-                        f"{ev[key]}"
-                    )
-
-            if live_stats:
-
-                st.caption(
-                    " • ".join(
-                        live_stats
-                    )
-                )
-
-        # ====================================================
-        # ANÁLISE COMPLETA
-        # ====================================================
-
-        with st.expander(
-            "📈 Ver análise completa",
-            expanded=False
+        if isinstance(
+            away,
+            str
         ):
 
-            x1, x2 = st.columns(2)
+            away_name = away
+            away_id = ""
 
-            with x1:
+        else:
 
-                st.markdown(
-                    "**Mercados**"
+            away_name = (
+                away.get("name")
+                or away.get(
+                    "shortName",
+                    "Fora"
                 )
-
-                st.write(
-                    f"BTTS Sim: "
-                    f"{row.get('BTTS', '-')} "
-                    f"| Over 2.5: "
-                    f"{row.get('O2.5', '-')} "
-                    f"| Under 3.5: "
-                    f"{row.get('U3.5', '-')}"
-                )
-
-                st.write(
-                    f"H2H analisados: "
-                    f"{row.get('H2H', 0)}"
-                )
-
-            with x2:
-
-                st.markdown(
-                    "**Sugestões principais**"
-                )
-
-                for nome, prob in suggestions(
-                    pred
-                ):
-
-                    st.write(
-                        f"• {nome}: "
-                        f"{pct(prob)}"
-                    )
-
-            # =================================================
-            # H2H
-            # =================================================
-
-            h = (
-                pred.get("h2h")
-                or {}
             )
 
-            if h.get(
-                "games"
-            ):
+            away_id = str(
+                away.get("id")
+                or ""
+            )
 
-                st.caption(
-                    f"H2H: "
-                    f"{h.get('games')} jogos "
-                    f"| Casa "
-                    f"{h.get('home_wins', 0)} "
-                    f"vitórias "
-                    f"| Empates "
-                    f"{h.get('draws', 0)} "
-                    f"| Fora "
-                    f"{h.get('away_wins', 0)}"
+        score = (
+            event.get("score")
+            or {}
+        )
+
+        return {
+
+            "id": str(
+                event.get(
+                    "id",
+                    ""
                 )
+            ),
+
+            "home": home_name,
+
+            "away": away_name,
+
+            "home_id": home_id,
+
+            "away_id": away_id,
+
+            "kickoff": (
+                event.get(
+                    "kickoff"
+                )
+                or event.get(
+                    "date"
+                )
+                or event.get(
+                    "utcDate"
+                )
+            ),
+
+            "status": (
+                event.get(
+                    "status",
+                    ""
+                )
+            ),
+
+            "home_score": (
+                score.get("home")
+                if isinstance(
+                    score,
+                    dict
+                )
+                else None
+            ),
+
+            "away_score": (
+                score.get("away")
+                if isinstance(
+                    score,
+                    dict
+                )
+                else None
+            ),
+
+            "source": "OpenFootAPI",
+
+            "raw": event,
+
+        }
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# 5DOLLAR FOOTBALL API
+# ============================================================
+
+@st.cache_data(
+    ttl=CALENDAR_TTL,
+    show_spinner=False
+)
+def fd5_day(day):
+
+    if not FD5_TOKEN:
+
+        return []
+
+    data = request_json(
+        f"{FD5_BASE}/fixtures",
+        headers={
+            "Authorization":
+                f"Bearer {FD5_TOKEN}"
+        },
+        params={
+            "date": day
+        }
+    )
+
+    if not data:
+
+        return []
+
+    if isinstance(
+        data,
+        list
+    ):
+
+        return data
+
+    return (
+        data.get("fixtures")
+        or data.get("data")
+        or []
+    )
+
+
+@st.cache_data(
+    ttl=CACHE_TTL,
+    show_spinner=False
+)
+def fd5_team_fixtures(
+    team_id
+):
+
+    if not FD5_TOKEN:
+        return []
+
+    data = request_json(
+        f"{FD5_BASE}/fixtures",
+        headers={
+            "Authorization":
+                f"Bearer {FD5_TOKEN}"
+        },
+        params={
+            "team": team_id
+        }
+    )
+
+    if not data:
+        return []
+
+    if isinstance(
+        data,
+        list
+    ):
+        return data
+
+    return (
+        data.get("fixtures")
+        or data.get("data")
+        or []
+    )
+
+
+def normalize_fd5_event(
+    event
+):
+
+    if not event:
+        return None
+
+    try:
+
+        home = (
+            event.get("home")
+            or event.get(
+                "homeTeam"
+            )
+            or {}
+        )
+
+        away = (
+            event.get("away")
+            or event.get(
+                "awayTeam"
+            )
+            or {}
+        )
+
+        if isinstance(
+            home,
+            str
+        ):
+
+            home_name = home
+            home_id = ""
+
+        else:
+
+            home_name = (
+                home.get("name")
+                or home.get(
+                    "teamName",
+                    "Casa"
+                )
+            )
+
+            home_id = str(
+                home.get("id")
+                or home.get(
+                    "teamId",
+                    ""
+                )
+            )
+
+        if isinstance(
+            away,
+            str
+        ):
+
+            away_name = away
+            away_id = ""
+
+        else:
+
+            away_name = (
+                away.get("name")
+                or away.get(
+                    "teamName",
+                    "Fora"
+                )
+            )
+
+            away_id = str(
+                away.get("id")
+                or away.get(
+                    "teamId",
+                    ""
+                )
+            )
+
+        score = (
+            event.get("score")
+            or event.get("scores")
+            or {}
+        )
+
+        return {
+
+            "id": str(
+                event.get(
+                    "id",
+                    ""
+                )
+            ),
+
+            "home": home_name,
+
+            "away": away_name,
+
+            "home_id": home_id,
+
+            "away_id": away_id,
+
+            "kickoff": (
+                event.get(
+                    "kickoff"
+                )
+                or event.get(
+                    "date"
+                )
+                or event.get(
+                    "utcDate"
+                )
+            ),
+
+            "status": (
+                event.get(
+                    "status",
+                    ""
+                )
+            ),
+
+            "home_score": (
+                score.get("home")
+                if isinstance(
+                    score,
+                    dict
+                )
+                else None
+            ),
+
+            "away_score": (
+                score.get("away")
+                if isinstance(
+                    score,
+                    dict
+                )
+                else None
+            ),
+
+            "source": (
+                "5DollarFootballAPI"
+            ),
+
+            "raw": event,
+
+        }
+
+    except Exception:
+
+        return None
