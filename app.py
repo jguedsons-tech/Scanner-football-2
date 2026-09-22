@@ -1,9 +1,3 @@
-# ============================================================
-# GLOBAL FOOTBALL SCANNER
-# L10 OBRIGATÓRIO — ÚLTIMOS 10 JOGOS
-# AO VIVO + PRÉ-JOGO
-# ============================================================
-
 import os
 import math
 import re
